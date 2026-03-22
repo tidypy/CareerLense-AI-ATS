@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+
+# IDEs
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+*.log
+error.txt
+models.txt
+debug.txt
