@@ -216,9 +216,25 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
   Future<void> _downloadHtml() async {
     if (_generatedHtml == null) return;
     try {
+      // Dynamically extract the job title from the generated HTML
+      String jobTitleString = '';
+      final RegExp regExp = RegExp(r'Target Role.*?<h1[^>]*>(.*?)</h1>', dotAll: true, caseSensitive: false);
+      final match = regExp.firstMatch(_generatedHtml!);
+      
+      if (match != null && match.group(1) != null) {
+        String rawTitle = match.group(1)!;
+        // Strip out any accidental inner HTML tags and keep only letters, numbers, and spaces
+        rawTitle = rawTitle.replaceAll(RegExp(r'<[^>]*>'), '');
+        rawTitle = rawTitle.replaceAll(RegExp(r'[^a-zA-Z0-9 ]'), '').trim();
+        
+        if (rawTitle.isNotEmpty) {
+          jobTitleString = '${rawTitle.replaceAll(' ', '_')}_';
+        }
+      }
+
       final bytes = Uint8List.fromList(utf8.encode(_generatedHtml!));
       await FileSaver.instance.saveFile(
-        name: 'CareerLens_Profile_\${DateTime.now().millisecondsSinceEpoch}',
+        name: 'CareerLens_Report_${jobTitleString}${DateTime.now().millisecondsSinceEpoch}',
         bytes: bytes,
         fileExtension: 'html',
         mimeType: MimeType.custom,
