@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:ui';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart'; // For kIsWeb
+import 'package:file_saver/file_saver.dart';
 
 void main() {
   runApp(const CareerLensApp());
@@ -18,7 +20,7 @@ class CareerLensApp extends StatelessWidget {
       title: 'CareerLens AI',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF2E6F40), // Premium dark green
+          seedColor: const Color(0xFF6750A4), // Primary purple
           brightness: Brightness.light,
         ),
         useMaterial3: true,
@@ -26,7 +28,7 @@ class CareerLensApp extends StatelessWidget {
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF43A047),
+          seedColor: const Color(0xFFD0BCFF), // Light purple for dark mode
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
@@ -208,6 +210,39 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
       setState(() {
         _isLoading = false;
       });
+    }
+  }
+
+  Future<void> _downloadHtml() async {
+    if (_generatedHtml == null) return;
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(_generatedHtml!));
+      await FileSaver.instance.saveFile(
+        name: 'CareerLens_Profile_\${DateTime.now().millisecondsSinceEpoch}',
+        bytes: bytes,
+        fileExtension: 'html',
+        mimeType: MimeType.custom,
+        customMimeType: 'text/html',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('HTML file saved successfully!'),
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving file: \$e'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     }
   }
 
@@ -446,6 +481,42 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
               ),
             ),
           ),
+          if (_generatedHtml != null && !_isLoading) ...[
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              height: 56,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: theme.colorScheme.secondary.withAlpha(50),
+                      blurRadius: 8,
+                      offset: const Offset(0, 4),
+                    )
+                  ]
+                ),
+                child: OutlinedButton.icon(
+                  onPressed: _downloadHtml,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: theme.colorScheme.primary,
+                    side: BorderSide(color: theme.colorScheme.primary, width: 2),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    backgroundColor: theme.colorScheme.surface.withAlpha(200),
+                  ),
+                  icon: const Icon(Icons.download),
+                  label: const Text(
+                    'Save As HTML',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 0.5),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
