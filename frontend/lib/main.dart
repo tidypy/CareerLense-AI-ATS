@@ -50,13 +50,23 @@ class CareerLensHome extends StatefulWidget {
 class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProviderStateMixin {
   final TextEditingController _resumeController = TextEditingController();
   final TextEditingController _jobDescController = TextEditingController();
+  final TextEditingController _apiKeyController = TextEditingController();
   
   bool _isLoading = false;
   String? _generatedHtml;
   String _apiStatus = "Checking API...";
 
   static const String _resumePrefKey = "saved_master_resume";
-  static const String _backendUrl = "http://127.0.0.1:8000/api/v1";
+  static const String _apiPrefKey = "saved_api_key";
+  
+  String get _backendUrl {
+    if (kIsWeb) {
+      return "${Uri.base.origin}/api/v1";
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      return "http://10.0.2.2:8000/api/v1";
+    }
+    return "http://127.0.0.1:8000/api/v1";
+  }
 
   // Animation controller for soft UI effects
   late AnimationController _animationController;
@@ -84,29 +94,29 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
     _animationController.dispose();
     _resumeController.dispose();
     _jobDescController.dispose();
+    _apiKeyController.dispose();
     super.dispose();
   }
 
   Future<void> _loadSavedResume() async {
     final prefs = await SharedPreferences.getInstance();
     final savedResume = prefs.getString(_resumePrefKey);
-    if (savedResume != null && savedResume.isNotEmpty) {
-      setState(() {
-        _resumeController.text = savedResume;
-      });
-    }
+    final savedApiKey = prefs.getString(_apiPrefKey);
+    
+    setState(() {
+      if (savedResume != null && savedResume.isNotEmpty) _resumeController.text = savedResume;
+      if (savedApiKey != null && savedApiKey.isNotEmpty) _apiKeyController.text = savedApiKey;
+    });
   }
 
   Future<void> _saveResume(String resumeText) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_resumePrefKey, resumeText);
+    await prefs.setString(_apiPrefKey, _apiKeyController.text.trim());
   }
 
   Future<void> _checkApiHealth() async {
     String healthUrl = "$_backendUrl/health";
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      healthUrl = "http://10.0.2.2:8000/api/v1/health";
-    }
 
     try {
       final response = await http.get(Uri.parse(healthUrl)).timeout(const Duration(seconds: 3));
@@ -146,9 +156,6 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
     await _saveResume(_resumeController.text);
 
     String generateUrl = "$_backendUrl/generate";
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      generateUrl = "http://10.0.2.2:8000/api/v1/generate";
-    }
 
     try {
       final response = await http.post(
@@ -157,6 +164,7 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
         body: jsonEncode({
           'job_description': _jobDescController.text.trim(),
           'master_resume': _resumeController.text.trim(),
+          if (_apiKeyController.text.trim().isNotEmpty) 'user_api_key': _apiKeyController.text.trim(),
         }),
       );
 
@@ -392,7 +400,7 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
           Expanded(
             flex: 1,
             child: CareerLensGlassCard(
-              child: _buildResultSection(theme),
+              child: _buildAdPlaceholder(theme),
             ),
           ),
         ],
@@ -411,7 +419,7 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
           ),
           const SizedBox(height: 24),
           CareerLensGlassCard(
-            child: _buildResultSection(theme),
+            child: _buildAdPlaceholder(theme),
           ),
         ],
       ),
@@ -454,6 +462,14 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
             label: 'Job Description', 
             hint: 'Paste the target job description here...', 
             maxLines: 6
+          ),
+          const SizedBox(height: 24),
+          _buildSoftTextField(
+            controller: _apiKeyController, 
+            theme: theme, 
+            label: 'Google API Key (Optional BYOK)', 
+            hint: 'Paste your own API key to securely bypass server credits...', 
+            maxLines: 1
           ),
           const SizedBox(height: 32),
           SizedBox(
@@ -532,6 +548,49 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
                 ),
               ),
             ),
+            const SizedBox(height: 24),
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: theme.colorScheme.outlineVariant.withAlpha(80)),
+                borderRadius: BorderRadius.circular(12),
+                color: theme.colorScheme.surface.withAlpha(50),
+              ),
+              child: Theme(
+                data: theme.copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  title: Text(
+                    'View Raw Output Code (Developer)',
+                    style: TextStyle(fontWeight: FontWeight.w600, color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                  leading: Icon(Icons.code, color: theme.colorScheme.primary),
+                  children: [
+                    Container(
+                      height: 220, // Matches height of the 8-line input box
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surfaceVariant.withAlpha(40),
+                        border: Border(top: BorderSide(color: theme.colorScheme.outlineVariant.withAlpha(50))),
+                        borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(12), bottomRight: Radius.circular(12)),
+                      ),
+                      child: Scrollbar(
+                        child: SingleChildScrollView(
+                          child: SelectableText(
+                            _generatedHtml!,
+                            style: TextStyle(
+                              fontFamily: 'monospace', 
+                              fontSize: 12,
+                              color: theme.colorScheme.onSurface,
+                              height: 1.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
         ],
       ),
@@ -580,124 +639,27 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
     );
   }
 
-  Widget _buildResultSection(ThemeData theme) {
-    return Padding(
-      padding: const EdgeInsets.all(24.0),
+  Widget _buildAdPlaceholder(ThemeData theme) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(32),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          Icon(Icons.campaign_outlined, size: 64, color: theme.colorScheme.outline.withAlpha(50)),
+          const SizedBox(height: 16),
           Text(
-            'Generated Output',
-            style: theme.textTheme.headlineSmall?.copyWith(
-              fontWeight: FontWeight.w800,
-              color: theme.colorScheme.onSurface,
-            ),
-          ),
-          const SizedBox(height: 24),
-          Expanded(
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 500),
-              transitionBuilder: (Widget child, Animation<double> animation) {
-                return FadeTransition(
-                  opacity: animation,
-                  child: SlideTransition(
-                    position: Tween<Offset>(
-                      begin: const Offset(0.0, 0.05),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
-                );
-              },
-              child: _buildResultContent(theme),
+            'Ad Space Available',
+            style: TextStyle(
+              color: theme.colorScheme.outline.withAlpha(150),
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 2,
             ),
           ),
         ],
       ),
     );
-  }
-
-  Widget _buildResultContent(ThemeData theme) {
-    if (_generatedHtml == null && !_isLoading) {
-      return Container(
-        key: const ValueKey('empty'),
-        width: double.infinity,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceVariant.withAlpha(80),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: theme.colorScheme.outlineVariant.withAlpha(80),
-            width: 2,
-          ),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.description_outlined, size: 72, color: theme.colorScheme.outline.withAlpha(150)),
-            const SizedBox(height: 24),
-            Text(
-              'No output generated yet', 
-              style: TextStyle(
-                color: theme.colorScheme.outline,
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
-              )
-            ),
-          ],
-        ),
-      );
-    } else if (_isLoading) {
-      return Center(
-        key: const ValueKey('loading'),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(
-              color: theme.colorScheme.primary,
-              strokeWidth: 3,
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'Crafting your profile...',
-              style: TextStyle(
-                color: theme.colorScheme.primary,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-              ),
-            )
-          ],
-        ),
-      );
-    } else {
-      return Container(
-        key: const ValueKey('result'),
-        width: double.infinity,
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surface.withAlpha(200),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: theme.colorScheme.outline.withAlpha(50)),
-          boxShadow: [
-            BoxShadow(
-              color: theme.colorScheme.shadow.withAlpha(10),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
-            )
-          ]
-        ),
-        child: SingleChildScrollView(
-          child: SelectableText(
-            _generatedHtml!,
-            style: TextStyle(
-              fontFamily: 'monospace', 
-              fontSize: 13,
-              color: theme.colorScheme.onSurface,
-              height: 1.5,
-            ),
-          ),
-        ),
-      );
-    }
   }
 }
 

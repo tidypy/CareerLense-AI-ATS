@@ -7,6 +7,9 @@ CareerLens AI is a robust sovereign application that customizes high-fidelity HT
 - **Frontend:** Flutter Web/Android (Dart)
 - **Deployment:** Docker & Docker Compose
 
+> [!WARNING]
+> **Beware of Aggressive Browser Caching:** Flutter Web applications compile into massive Javascript bundles (`main.dart.js`) that modern browsers (especially Chrome) aggressively cache. If you successfully build the `main.dart` UI and spin up the Docker container but see no changes on the page, you MUST perform a Hard Refresh (`Ctrl+F5` or `Cmd+Shift+R`) to force the browser to dump the cached DOM payload.
+
 ## Prerequisites
 - **Flutter SDK:** Must be installed and accessible in your PATH (`flutter`).
 - **Docker & Docker Compose:** For running the isolated backend container.
