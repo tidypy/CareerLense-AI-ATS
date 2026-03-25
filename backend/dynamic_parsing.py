@@ -7,7 +7,10 @@ def parse_html_to_pydantic(html_content: str) -> type[BaseModel]:
 
     # 1. Base scalars: {{ VAR }}
     for var in re.findall(r'\{\{\s*([A-Z0-9_]+)\s*\}\}', html_content):
-        fields[var] = (Optional[str], Field(default=None))
+        if var in ["CANDIDATE_NAME", "CANDIDATE_LOCATION", "CANDIDATE_EMAIL", "CANDIDATE_LINKEDIN"]:
+            fields[var] = (str, Field(...))
+        else:
+            fields[var] = (Optional[str], Field(default=None))
 
     # 2. Top-level lists: {% for item in LIST_NAME %}
     for match in re.finditer(r'\{%\s*for\s+(\w+)\s+in\s+([A-Z0-9_]+)\s*%\}', html_content):

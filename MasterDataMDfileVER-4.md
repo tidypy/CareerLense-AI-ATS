@@ -147,7 +147,7 @@
 > **PLACEHOLDER MAP:**
 > - Header: {{JOB_TITLE}}, {{JOB_SUBTITLE}} (Location/Context), {{RESUME_HEADLINE}} (Tailored title for candidate), {{TAILORED_SUMMARY}} (3-4 sentence professional summary).
 > - Scoring: {{CONFIDENCE_SCORE}} (0.0 to 10.0), {{CONFIDENCE_REMAINDER}} (exactly 10 minus Confidence Score).
-> - Top 5 Match Cards: {{MATCH_N_ICON}} (FontAwesome class), {{MATCH_N_TITLE}}, {{MATCH_N_BADGE}}, {{MATCH_N_DESC}}, {{MATCH_N_TAG_1}}, {{MATCH_N_TAG_2}}.
+> - Top 6 Match Cards: {{MATCH_N_ICON}} (FontAwesome class), {{MATCH_N_TITLE}}, {{MATCH_N_BADGE}}, {{MATCH_N_DESC}}, {{MATCH_N_TAG_1}}, {{MATCH_N_TAG_2}}.
 > - Gap Mitigation Card: {{GAP_ICON}}, {{GAP_TITLE}}, {{GAP_DESC}} (Identify one missing skill from JD and explain how existing skills mitigate it).
 > - Commute Card: {{COMMUTE_TIME}}, {{COMMUTE_LOCATION}}
 > - Salary Card: {{MARKET_SALARY}}, {{SALARY_NOTE}}

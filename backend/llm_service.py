@@ -95,52 +95,82 @@ def run_generation_with_retry(
         job_description: str,
         master_resume: str,
         schema_model: Type[BaseModel],
-        attempt_history: dict) -> BaseModel:
+        attempt_history: dict,
+        target_seniority: str = "Mid-Level") -> BaseModel:
     
     attempt_history["attempt"] += 1
     
     master_facts = read_master_data()
     model_schema_json = json.dumps(schema_model.model_json_schema(), indent=2)
     
-    # Problem 5: Token Budget Management
-    # If this is a retry, do not blindly append the massive user resume.
-    if attempt_history["attempt"] == 1:
-        system_prompt = f"""You are an expert Career Advisor and ATS Optimizer.
+    SENIORITY_MATRIX = {
+        "Executive": """DIRECTIVE: Target seniority is EXECUTIVE.
+Title Selection: Prioritize (Exec) variants (e.g., Director, Owner).
+Content Weight: 80% Strategy/ROI, 20% Execution.
+Achievement Filter: Focus on P&L impact, governance, $250k+ savings, and organizational architecture.
+JSON Map: Fill {{REALITY_BADGE}} with "Strategic Asset."
+""",
+        "Senior": """DIRECTIVE: Target seniority is SENIOR.
+Title Selection: Prioritize (Sr) or (Exec) if the role is a "Lead" position.
+Content Weight: 50% Technical Expertise, 50% Leadership/Mentoring.
+Achievement Filter: Focus on process optimization, systems architecture, and project spearheading.
+JSON Map: Fill {{REALITY_BADGE}} with "Subject Matter Expert."
+""",
+        "Mid-Level": """DIRECTIVE: Target seniority is MID-LEVEL.
+Title Selection: STRICT: Pick ONLY (Mid) variants. Redact all "Director," "Owner," and "SBA" prefixes.
+Content Weight: 90% Task Execution/Compliance, 10% Oversight.
+Achievement Filter: Focus on SOP adherence, daily operations, payroll accuracy, and technical proficiency.
+JSON Map: Fill {{REALITY_BADGE}} with "Turnkey Professional."
+""",
+        "Junior": """DIRECTIVE: Target seniority is JUNIOR.
+Title Selection: Pick (Mid) or (Entry) variants. Strip all management-level achievements.
+Content Weight: 100% Technical Tasks/Learning.
+Achievement Filter: Focus on reliability, documentation, and specific tool utilization.
+JSON Map: Fill {{REALITY_BADGE}} with "High-Potential Contributor."
+""",
+        "Entry": """DIRECTIVE: Target seniority is ENTRY/ASSISTANT.
+Title Selection: STRICT: Use (Entry) titles. If unavailable, use (Mid) and downgrade the summary to "Coordinator" or "Support".
+Content Weight: 100% Administrative/Manual Support.
+Achievement Filter: Focus on attendance, basic workflow completion, and general support tasks.
+JSON Map: Fill {{REALITY_BADGE}} with "Foundational Asset."
+"""
+    }
+    directive = SENIORITY_MATRIX.get(target_seniority, SENIORITY_MATRIX["Mid-Level"])
+    
+    system_prompt = f"""You are an expert Career Advisor and ATS Optimizer.
 You MUST output a pure, complete JSON object. DO NOT SKIP SECTIONS. DO NOT TRUNCATE.
 The JSON structure must STRICTLY adhere to this schema definition:
 {model_schema_json}
 
 IMPORTANT RULES:
-1. For array fields (like 'MATCHES', 'EXPERIENCES', 'TECHNOLOGIES'), you MUST output a proper JSON Array of objects (e.g. [{{"TITLE": "..."}}]). DO NOT hallucinate flat keys like 'MATCH_1_TITLE'.
-2. Do not include any reasoning blocks, markdown tags, or conversational text. Output purely the JSON object so it parses immediately.
+1. For array fields (like 'MATCHES', 'EXPERIENCES', 'TECHNOLOGIES'), you MUST output a proper JSON Array of objects. DO NOT hallucinate flat keys.
+2. You MUST extract candidate contact information (CANDIDATE_NAME, CANDIDATE_LOCATION, CANDIDATE_EMAIL, CANDIDATE_LINKEDIN) from the Master Profile. If a specific piece of contact data is completely missing from the user's resume, output "Not Provided" rather than null.
+3. You MUST generate EXACTLY 6 objects inside the 'MATCHES' array to complete the UI grid layout.
+4. Output purely the JSON object so it parses immediately.
 
 Use the following candidate facts as reference:
 {master_facts}
+
+--- CRITICAL SENIORITY DIRECTIVE ---
+{directive}
 """
-        user_prompt = f"Job Description:\n{job_description}\n\nMaster Profile:\n{master_resume}"
-    else:
-        # Token Management: Send ONLY strict schema rules alongside specific validation errors.
+    user_prompt = f"Job Description:\n{job_description}\n\nMaster Profile:\n{master_resume}"
+
+    if attempt_history["attempt"] > 1:
         validation_errors = attempt_history.get("last_error", "Invalid JSON format.")
-        system_prompt = f"""You MUST output a raw JSON object string ONLY. DO NOT TRUNCATE. Your response must strictly validate against the following schema:
-{model_schema_json}
-
-IMPORTANT: For array fields, output a proper JSON Array! DO NOT hallucinate flat keys like 'MATCH_1_TITLE'.
-
-Your last attempt failed with the following validation errors. Fix these exact missing or malformed keys:
-{validation_errors}
-"""
-        user_prompt = "Generate the corrected complete JSON incorporating the missing/malformed keys."
+        system_prompt += f"\n\nCRITICAL FIX REQUIRED: Your last attempt failed with the following JSON validation errors. You MUST fix these missing/malformed keys:\n{validation_errors}"
     
     try:
         raw_output = client.generate_json(system_prompt, user_prompt)
         
         # Cleanup
+        raw_output = str(raw_output).strip()
         if raw_output.startswith("```json"):
-            raw_output = raw_output[7:]
-        if raw_output.startswith("```"):
-            raw_output = raw_output[3:]
+            raw_output = raw_output.replace("```json", "", 1)
         if raw_output.endswith("```"):
-            raw_output = raw_output[:-3]
+            raw_output = raw_output[:len(raw_output)-3]
+        if raw_output.startswith("```"):
+            raw_output = raw_output.replace("```", "", 1)
             
         parsed_json = json.loads(raw_output.strip())
         validated_data = schema_model(**parsed_json)
@@ -168,7 +198,7 @@ Your last attempt failed with the following validation errors. Fix these exact m
         raise
 
 
-def generate_career_data(job_description: str, master_resume: str, schema_model: Type[BaseModel], user_api_key: str = None) -> BaseModel:
+def generate_career_data(job_description: str, master_resume: str, schema_model: Type[BaseModel], user_api_key: str = None, target_seniority: str = "Mid-Level") -> BaseModel:
     provider_str = os.getenv("LLM_PROVIDER", "auto").lower()
     
     # Instantiate clients
@@ -197,8 +227,8 @@ def generate_career_data(job_description: str, master_resume: str, schema_model:
     def try_with_client(client: LLMClient, name: str):
         if not client:
             raise ValueError(f"{name} client is unavailable.")
-        print(f"Attempting generation with {name} client...")
-        return run_generation_with_retry(client, job_description, master_resume, schema_model, {"attempt": 0})
+        print(f"Attempting generation with {name} client for seniority {target_seniority}...")
+        return run_generation_with_retry(client, job_description, master_resume, schema_model, {"attempt": 0}, target_seniority)
 
     # Problem 4: Backup failover logic ("Two-Phase Credit Commit")
     if provider_str == "google":

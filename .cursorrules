@@ -1,0 +1,5 @@
+# Project Rules: CareerLens AI ATS V3
+
+* **Strict Docker Enforcement:** This project is strictly containerized. Do NOT attempt to create local `venv` environments, install Python dependencies, or run flutter commands directly on the host machine. If you break this rule, it creates massive dependency fiascos for the user.
+* **Always Rebuild on Changes:** If you make ANY changes to the Python backend or Flutter frontend code, `docker-compose restart` is insufficient. You MUST run `cmd /c docker-compose up --build -d` to ensure the compilation pushes the new code into the container image.
+* **Web Cache:** After rebuilding the backend/frontend containers, remind the user to press `Ctrl+F5` to clear the browser webcache so the new UI assets render properly.

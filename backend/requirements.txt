@@ -5,3 +5,5 @@ openai
 google-generativeai
 python-dotenv
 tenacity
+jinja2
+sqlalchemy

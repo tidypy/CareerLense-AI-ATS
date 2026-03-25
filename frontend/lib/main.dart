@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:file_saver/file_saver.dart';
+import 'package:universal_html/html.dart' as html;
 
 void main() {
   runApp(const CareerLensApp());
@@ -51,6 +52,9 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
   final TextEditingController _resumeController = TextEditingController();
   final TextEditingController _jobDescController = TextEditingController();
   final TextEditingController _apiKeyController = TextEditingController();
+  
+  String _selectedSeniority = 'Mid-Level';
+  final List<String> _seniorityOptions = ['Executive', 'Senior', 'Mid-Level', 'Junior', 'Entry'];
   
   bool _isLoading = false;
   String? _generatedHtml;
@@ -164,6 +168,7 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
         body: jsonEncode({
           'job_description': _jobDescController.text.trim(),
           'master_resume': _resumeController.text.trim(),
+          'target_seniority': _selectedSeniority,
           if (_apiKeyController.text.trim().isNotEmpty) 'user_api_key': _apiKeyController.text.trim(),
         }),
       );
@@ -241,13 +246,25 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
       }
 
       final bytes = Uint8List.fromList(utf8.encode(_generatedHtml!));
-      await FileSaver.instance.saveFile(
-        name: 'CareerLens_Report_${jobTitleString}${DateTime.now().millisecondsSinceEpoch}',
-        bytes: bytes,
-        fileExtension: 'html',
-        mimeType: MimeType.custom,
-        customMimeType: 'text/html',
-      );
+      final filename = 'CareerLens_Report_${jobTitleString}${DateTime.now().millisecondsSinceEpoch}.html';
+
+      if (kIsWeb) {
+        final blob = html.Blob([bytes], 'text/html');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        final anchor = html.AnchorElement(href: url)
+          ..setAttribute("download", filename)
+          ..click();
+        html.Url.revokeObjectUrl(url);
+      } else {
+        await FileSaver.instance.saveFile(
+          name: 'CareerLens_Report_${jobTitleString}${DateTime.now().millisecondsSinceEpoch}',
+          bytes: bytes,
+          fileExtension: 'html',
+          mimeType: MimeType.custom,
+          customMimeType: 'text/html',
+        );
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -400,7 +417,9 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
           Expanded(
             flex: 1,
             child: CareerLensGlassCard(
-              child: _buildAdPlaceholder(theme),
+              child: _generatedHtml != null 
+                  ? _buildOutputSection(theme) 
+                  : _buildAdPlaceholder(theme),
             ),
           ),
         ],
@@ -419,7 +438,9 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
           ),
           const SizedBox(height: 24),
           CareerLensGlassCard(
-            child: _buildAdPlaceholder(theme),
+            child: _generatedHtml != null 
+                ? _buildOutputSection(theme) 
+                : _buildAdPlaceholder(theme),
           ),
         ],
       ),
@@ -463,6 +484,8 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
             hint: 'Paste the target job description here...', 
             maxLines: 6
           ),
+          const SizedBox(height: 24),
+          _buildSeniorityDropdown(theme),
           const SizedBox(height: 24),
           _buildSoftTextField(
             controller: _apiKeyController, 
@@ -513,85 +536,6 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
               ),
             ),
           ),
-          if (_generatedHtml != null && !_isLoading) ...[
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: theme.colorScheme.secondary.withAlpha(50),
-                      blurRadius: 8,
-                      offset: const Offset(0, 4),
-                    )
-                  ]
-                ),
-                child: OutlinedButton.icon(
-                  onPressed: _downloadHtml,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: theme.colorScheme.primary,
-                    side: BorderSide(color: theme.colorScheme.primary, width: 2),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    backgroundColor: theme.colorScheme.surface.withAlpha(200),
-                  ),
-                  icon: const Icon(Icons.download),
-                  label: const Text(
-                    'Save As HTML',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 0.5),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Container(
-              decoration: BoxDecoration(
-                border: Border.all(color: theme.colorScheme.outlineVariant.withAlpha(80)),
-                borderRadius: BorderRadius.circular(12),
-                color: theme.colorScheme.surface.withAlpha(50),
-              ),
-              child: Theme(
-                data: theme.copyWith(dividerColor: Colors.transparent),
-                child: ExpansionTile(
-                  title: Text(
-                    'View Raw Output Code (Developer)',
-                    style: TextStyle(fontWeight: FontWeight.w600, color: theme.colorScheme.onSurfaceVariant),
-                  ),
-                  leading: Icon(Icons.code, color: theme.colorScheme.primary),
-                  children: [
-                    Container(
-                      height: 220, // Matches height of the 8-line input box
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.surfaceVariant.withAlpha(40),
-                        border: Border(top: BorderSide(color: theme.colorScheme.outlineVariant.withAlpha(50))),
-                        borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(12), bottomRight: Radius.circular(12)),
-                      ),
-                      child: Scrollbar(
-                        child: SingleChildScrollView(
-                          child: SelectableText(
-                            _generatedHtml!,
-                            style: TextStyle(
-                              fontFamily: 'monospace', 
-                              fontSize: 12,
-                              color: theme.colorScheme.onSurface,
-                              height: 1.5,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -639,6 +583,59 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
     );
   }
 
+  Widget _buildOutputSection(ThemeData theme) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(48),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.check_circle_outline, size: 80, color: theme.colorScheme.primary),
+          const SizedBox(height: 24),
+          Text(
+            'Template Successfully Generated!',
+            style: TextStyle(
+              color: theme.colorScheme.onSurface,
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Your ATS-optimized resume profile is ready.',
+            style: TextStyle(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontSize: 16,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 48),
+          SizedBox(
+            width: double.infinity,
+            height: 64,
+            child: ElevatedButton.icon(
+              onPressed: _downloadHtml,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: theme.colorScheme.primary,
+                foregroundColor: theme.colorScheme.onPrimary,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                elevation: 4,
+              ),
+              icon: const Icon(Icons.download, size: 28),
+              label: const Text(
+                'SAVE AS HTML',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildAdPlaceholder(ThemeData theme) {
     return Container(
       width: double.infinity,
@@ -658,6 +655,45 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSeniorityDropdown(ThemeData theme) {
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface.withAlpha(150),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: theme.colorScheme.shadow.withAlpha(10),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+            spreadRadius: 1,
+          )
+        ]
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      child: DropdownButtonFormField<String>(
+        value: _selectedSeniority,
+        decoration: InputDecoration(
+          labelText: 'Target Job Seniority Strategy',
+          labelStyle: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold),
+          border: InputBorder.none,
+        ),
+        dropdownColor: theme.colorScheme.surface,
+        style: TextStyle(color: theme.colorScheme.onSurface, fontSize: 16),
+        items: _seniorityOptions.map((String value) {
+          return DropdownMenuItem<String>(
+            value: value,
+            child: Text(value),
+          );
+        }).toList(),
+        onChanged: (newValue) {
+          setState(() {
+            _selectedSeniority = newValue!;
+          });
+        },
       ),
     );
   }
