@@ -141,10 +141,10 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
   }
 
   Future<void> _generateCareerData() async {
-    if (_resumeController.text.trim().isEmpty || _jobDescController.text.trim().isEmpty) {
+    if (_jobDescController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('Please provide both Master Resume and Job Description'),
+          content: const Text('Please provide a Job Description'),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),

@@ -159,29 +159,25 @@ Physical Android Phone (Tailscale client)
 
 ---
 
-## Development Workflow
+## Testing Workflow
 
-### Local Development
+Testing refactors requires a full container rebuild because the backend static folder (where the Flutter UI lives) is populated during the Docker build stage.
 
-```bash
-# Start LM Studio with API server on port 1234
-# Then:
-cd backend
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Docker Build & Run
+### The "Full Rebuild" Cycle
 
 ```bash
-docker compose build
-docker compose up
-# Access at http://localhost:8000
+# 1. Force a complete rebuild of both frontend and backend
+docker compose build --no-cache
+
+# 2. Start the container
+docker compose up -d
 ```
 
-### Build Scripts
+### Critical Verification Steps
 
-- `build.ps1` — PowerShell build script for Windows
-- `build.sh` — Shell build script for Linux/Mac
+1.  **Frontend Cache Blast**: Because the Flutter UI is served as a static web app (via Chrome), browsers will aggressively cache `main.dart.js`. After a rebuild, you **MUST** press `Ctrl + F5` (force refresh) in your browser to see the latest frontend changes.
+2.  **Logs Observation**: Use `docker compose logs -f careerlens-backend` to monitor for initialization errors or LLM routing logs.
+3.  **Local RTX Verification**: Ensure LM Studio is running on the host before starting the container if testing local path.
 
 ---
 

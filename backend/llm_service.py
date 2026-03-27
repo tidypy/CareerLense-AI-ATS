@@ -34,11 +34,11 @@ def read_master_data() -> str:
 
 # Provider Abstraction
 class LLMClient:
-    def generate_json(self, system_prompt: str, user_prompt: str) -> str:
+    def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
         raise NotImplementedError
 
 class GoogleLLMClient(LLMClient):
-    def __init__(self, user_api_key: str = None):
+    def __init__(self, user_api_key: str | None = None):
         self.api_key = user_api_key if user_api_key else os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_API_KEY is missing and no BYOK provided")
@@ -50,10 +50,20 @@ class GoogleLLMClient(LLMClient):
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
 
-    def generate_json(self, system_prompt: str, user_prompt: str) -> str:
+    def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
         try:
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            response = self.model.generate_content(full_prompt)
+            
+            # If schema is provided, we can either update the model config or pass it here.
+            # For Gemini, it's often best to set it in the generation_config.
+            generation_config: dict = {"response_mime_type": "application/json"}
+            if schema_json:
+                generation_config["response_schema"] = schema_json
+
+            response = self.model.generate_content(
+                full_prompt,
+                generation_config=generation_config
+            )
             return response.text
         except google_exceptions.InvalidArgument as e:
             raise BYOKKeyError(f"Invalid API key — Google rejected it. Check that your key is correct. ({e.message})") from e
@@ -65,7 +75,7 @@ class GoogleLLMClient(LLMClient):
             raise BYOKKeyError(f"API key authentication failed. The key may be expired or revoked. ({e.message})") from e
 
 class LocalLLMClient(LLMClient):
-    def __init__(self, base_url: str = None):
+    def __init__(self, base_url: str | None = None):
         api_key = "not-needed"
         model_id = "local-model"
         
@@ -87,17 +97,30 @@ class LocalLLMClient(LLMClient):
         self.model_id = model_id
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         
-    def generate_json(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model_id,
-            messages=[
+    def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
+        kwargs: dict = {
+            "model": self.model_id,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.7,
-            max_tokens=24000
-        )
-        return response.choices[0].message.content
+            "temperature": 0.7,
+            "max_tokens": 24000
+        }
+
+        # Enable structured output if schema is provided
+        if schema_json:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "CareerData",
+                    "strict": False,
+                    "schema": schema_json
+                }
+            }
+
+        response = self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
 
 
 class JSONRecoveryRetryError(Exception):
@@ -114,8 +137,14 @@ def run_generation_with_retry(
     
     attempt_history["attempt"] += 1
     
-    master_facts = read_master_data()
-    model_schema_json = json.dumps(schema_model.model_json_schema(), indent=2)
+    # Determine source of truth: User Input vs. Local Personal Data
+    if master_resume and master_resume.strip():
+        master_facts = master_resume.strip()
+    else:
+        master_facts = read_master_data()
+
+    # Extract the actual dict schema for API consumption
+    schema_dict = schema_model.model_json_schema()
     
     SENIORITY_MATRIX = {
         "Executive": """DIRECTIVE: Target seniority is EXECUTIVE.
@@ -152,15 +181,14 @@ JSON Map: Fill {{REALITY_BADGE}} with "Foundational Asset."
     directive = SENIORITY_MATRIX.get(target_seniority, SENIORITY_MATRIX["Mid-Level"])
     
     system_prompt = f"""You are an expert Career Advisor and ATS Optimizer.
-You MUST output a pure, complete JSON object. DO NOT SKIP SECTIONS. DO NOT TRUNCATE.
-The JSON structure must STRICTLY adhere to this schema definition:
-{model_schema_json}
+Your goal is to transform the provided master profile into a highly tailored, ATS-optimized report for the specific job description.
 
 IMPORTANT RULES:
-1. For array fields (like 'MATCHES', 'EXPERIENCES', 'TECHNOLOGIES'), you MUST output a proper JSON Array of objects. DO NOT hallucinate flat keys.
-2. You MUST extract candidate contact information (CANDIDATE_NAME, CANDIDATE_LOCATION, CANDIDATE_EMAIL, CANDIDATE_LINKEDIN) from the Master Profile. If a specific piece of contact data is completely missing from the user's resume, output "Not Provided" rather than null.
-3. You MUST generate EXACTLY 6 objects inside the 'MATCHES' array to complete the UI grid layout.
-4. Output purely the JSON object so it parses immediately.
+1. Complete JSON: You MUST output a complete, valid JSON object that populates EVERY field in the provided schema. Do not skip or truncate any section.
+2. No Markdown: Do NOT use markdown formatting (like **bolding**) inside any JSON string values. Use plain text only.
+3. Contact Info: Extract CANDIDATE_NAME, CANDIDATE_LOCATION, CANDIDATE_EMAIL, CANDIDATE_LINKEDIN from the Master Profile. Use "Not Provided" if missing.
+4. Structure: You MUST generate EXACTLY 6 objects inside the 'MATCHES' array to complete the UI grid layout.
+5. Content: Be specific, quantifiable, and align exactly with the target seniority.
 
 Use the following candidate facts as reference:
 {master_facts}
@@ -168,21 +196,24 @@ Use the following candidate facts as reference:
 --- CRITICAL SENIORITY DIRECTIVE ---
 {directive}
 """
-    user_prompt = f"Job Description:\n{job_description}\n\nMaster Profile:\n{master_resume}"
+    # Fallback to including the schema in the prompt only if we were NOT doing constrained decoding
+    # But here we will always pass the schema dict to the client now.
+    
+    user_prompt = f"Job Description:\n{job_description}"
 
     if attempt_history["attempt"] > 1:
         validation_errors = attempt_history.get("last_error", "Invalid JSON format.")
-        system_prompt += f"\n\nCRITICAL FIX REQUIRED: Your last attempt failed with the following JSON validation errors. You MUST fix these missing/malformed keys:\n{validation_errors}"
+        system_prompt += f"\n\nCRITICAL FIX REQUIRED: Your last attempt failed with validation errors. You MUST fix these:\n{validation_errors}"
     
     try:
-        raw_output = client.generate_json(system_prompt, user_prompt)
+        raw_output = client.generate_json(system_prompt, user_prompt, schema_json=schema_dict)
         
         # Cleanup
         raw_output = str(raw_output).strip()
         if raw_output.startswith("```json"):
             raw_output = raw_output.replace("```json", "", 1)
         if raw_output.endswith("```"):
-            raw_output = raw_output[:len(raw_output)-3]
+            raw_output = raw_output[:-3]
         if raw_output.startswith("```"):
             raw_output = raw_output.replace("```", "", 1)
             
@@ -216,7 +247,7 @@ def generate_career_data(
     job_description: str,
     master_resume: str,
     schema_model: Type[BaseModel],
-    user_api_key: str = None,
+    user_api_key: str | None = None,
     target_seniority: str = "Mid-Level"
 ) -> BaseModel:
     """

@@ -56,7 +56,7 @@ app.add_middleware(
 
 class GenerateRequest(BaseModel):
     job_description: str
-    master_resume: str
+    master_resume: str = ""
     user_api_key: str | None = None
     target_seniority: str = "Mid-Level"
 
@@ -100,8 +100,10 @@ def _do_generate(req: GenerateRequest, client_ip: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read template or build schema: {e}")
 
-    if not req.job_description or not req.master_resume:
-        raise HTTPException(status_code=400, detail="Missing inputs")
+    if not req.job_description:
+        raise HTTPException(status_code=400, detail="Missing Job Description")
+    
+    # master_resume is now optional; if blank, llm_service falls back to personal MD file
 
     byok_error_reason: str | None = None
 
