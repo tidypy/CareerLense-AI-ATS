@@ -8,9 +8,14 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from fastapi import HTTPException
 from dotenv import load_dotenv
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from openai import OpenAI
 
 load_dotenv()
+
+# Raised when the user's BYOK key is invalid/expired/out of quota
+class BYOKKeyError(Exception):
+    pass
 
 class LLMProvider(str, Enum):
     GOOGLE = "google"
@@ -46,9 +51,18 @@ class GoogleLLMClient(LLMClient):
         self.model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> str:
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        response = self.model.generate_content(full_prompt)
-        return response.text
+        try:
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+            response = self.model.generate_content(full_prompt)
+            return response.text
+        except google_exceptions.InvalidArgument as e:
+            raise BYOKKeyError(f"Invalid API key — Google rejected it. Check that your key is correct. ({e.message})") from e
+        except google_exceptions.PermissionDenied as e:
+            raise BYOKKeyError(f"API key does not have permission. Verify the key is enabled for Gemini. ({e.message})") from e
+        except google_exceptions.ResourceExhausted as e:
+            raise BYOKKeyError(f"API key quota exhausted — you are out of tokens or have hit a rate limit. ({e.message})") from e
+        except google_exceptions.Unauthenticated as e:
+            raise BYOKKeyError(f"API key authentication failed. The key may be expired or revoked. ({e.message})") from e
 
 class LocalLLMClient(LLMClient):
     def __init__(self, base_url: str = None):
@@ -198,49 +212,45 @@ Use the following candidate facts as reference:
         raise
 
 
-def generate_career_data(job_description: str, master_resume: str, schema_model: Type[BaseModel], user_api_key: str = None, target_seniority: str = "Mid-Level") -> BaseModel:
-    provider_str = os.getenv("LLM_PROVIDER", "auto").lower()
-    
-    # Instantiate clients
-    google_client = None
-    local_client = None
-    
+def generate_career_data(
+    job_description: str,
+    master_resume: str,
+    schema_model: Type[BaseModel],
+    user_api_key: str = None,
+    target_seniority: str = "Mid-Level"
+) -> BaseModel:
+    """
+    BYOK Routing Rules:
+    - user_api_key is blank/None → go DIRECTLY to Local RTX (TailScale). Skip Google entirely.
+    - user_api_key is an http/https URL → treat as LM Studio endpoint, go local.
+    - user_api_key has a value (Google key) → try Google first.
+        - If BYOKKeyError is raised, re-raise it so main.py can fall back to local
+          and set the X-BYOK-Error response header for the frontend dialog.
+    """
     is_lm_link = user_api_key and (user_api_key.startswith("http://") or user_api_key.startswith("https://"))
-    
-    if is_lm_link:
-        provider_str = "local"
-        try:
-            local_client = LocalLLMClient(base_url=user_api_key)
-        except Exception as e:
-            print(f"Local Client init failed: {e}")
-    else:
-        try:
-            google_client = GoogleLLMClient(user_api_key=user_api_key)
-        except Exception as e:
-            print(f"Google Client init failed: {e}")
-            
-        try:
-            local_client = LocalLLMClient()
-        except Exception as e:
-            print(f"Local Client init failed: {e}")
-        
+    has_user_key = bool(user_api_key and user_api_key.strip())
+
     def try_with_client(client: LLMClient, name: str):
         if not client:
             raise ValueError(f"{name} client is unavailable.")
-        print(f"Attempting generation with {name} client for seniority {target_seniority}...")
+        print(f"[BYOK] Attempting generation with {name} client for seniority '{target_seniority}'...")
         return run_generation_with_retry(client, job_description, master_resume, schema_model, {"attempt": 0}, target_seniority)
 
-    # Problem 4: Backup failover logic ("Two-Phase Credit Commit")
-    if provider_str == "google":
-        return try_with_client(google_client, "Google")
-    elif provider_str == "local":
-        return try_with_client(local_client, "Local")
-    else:
-        try:
-            return try_with_client(google_client, "Google")
-        except Exception as e:
-            print(f"Primary Provider (Google) failed 3 times: {e}. Graceful failover to Backup Provider (Local)...")
-            try:
-                return try_with_client(local_client, "Local")
-            except Exception as e_local:
-                raise Exception(f"Total Failure. Primary error: {e}. Backup error: {e_local}")
+    # ── Path A: LM Studio URL provided ──────────────────────────────────────
+    if is_lm_link:
+        print(f"[BYOK] LM Studio URL detected — routing directly to Local.")
+        local_client = LocalLLMClient(base_url=user_api_key)
+        return try_with_client(local_client, "Local (LM Studio BYOK)")
+
+    # ── Path B: Blank key — skip Google, go straight to Local RTX ───────────
+    if not has_user_key:
+        print(f"[BYOK] Key is blank — routing directly to Local RTX (TailScale).")
+        local_client = LocalLLMClient()
+        return try_with_client(local_client, "Local RTX")
+
+    # ── Path C: Google BYOK key provided — try Google, propagate BYOKKeyError ─
+    print(f"[BYOK] User key provided — trying Google first.")
+    google_client = GoogleLLMClient(user_api_key=user_api_key)
+    # BYOKKeyError is intentionally NOT caught here — let main.py handle it
+    # so it can do the local fallback and set the response header.
+    return try_with_client(google_client, "Google (BYOK)")
