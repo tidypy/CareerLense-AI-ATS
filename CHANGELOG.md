@@ -8,6 +8,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased] — 2026-03-27
 
+### Planned
+
+#### ⚡ Schema-First Constrained Decoding Refactor ([#2](https://github.com/tidypy/CareerLense-AI-ATS/issues/2))
+
+**Goal:** Replace prompt-based JSON instructions with Pydantic-driven constrained decoding to eliminate the "Reasoning Loop" bottleneck on local models and achieve 5-second generation targets.
+
+- **Step 1:** `LocalLLMClient` — pass `response_format` with JSON Schema for GBNF constrained decoding via LM Studio
+- **Step 2:** `GoogleLLMClient` — pass `response_schema` to Gemini API alongside `response_mime_type`
+- **Step 3:** Strip redundant JSON formatting directives from the system prompt (keep content/seniority directives)
+- **Step 4:** Retain Pydantic validation as a safety net; graceful fallback for models without structured output support
+
 ### Fixed
 
 #### 🔑 BYOK (Bring Your Own Key) — Routing & Fallback Overhaul
