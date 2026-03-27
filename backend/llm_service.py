@@ -217,29 +217,40 @@ Use the following candidate facts as reference:
         if raw_output.startswith("```"):
             raw_output = raw_output.replace("```", "", 1)
             
-        parsed_json = json.loads(raw_output.strip())
-        validated_data = schema_model(**parsed_json)
-        return validated_data
+        # Robust Validation
+        try:
+            parsed_json = json.loads(raw_output.strip())
+        except json.JSONDecodeError as e:
+            print(f"JSON Parse error on attempt {attempt_history['attempt']}: {e}")
+            print(f"RAW OUTPUT THAT FAILED TO PARSE:\n{raw_output}")
+            attempt_history["last_error"] = f"JSON Decode Error: {str(e)}"
+            raise JSONRecoveryRetryError(f"Failed to parse JSON: {str(e)}")
+
+        # Type Guard: Ensure schema_model is a class and not an error object
+        if not hasattr(schema_model, "model_validate"):
+             print(f"ERROR: schema_model is not a valid Pydantic V2 class! Got: {type(schema_model)}")
+             raise TypeError(f"Expected a Pydantic V2 model class, got {type(schema_model)}")
+
+        try:
+            # Use model_validate (Pydantic V2) for better error reporting
+            validated_data = schema_model.model_validate(parsed_json)
+            return validated_data
+        except ValidationError as e:
+            # Problem 1: Vague Retry Feedback
+            # Iterate over e.errors() and capture exact missing/malformed keys
+            error_details = []
+            for err in e.errors():
+                loc = " -> ".join([str(l) for l in err['loc']])
+                error_details.append(f"Key '{loc}': {err['msg']} (Input Type: {err.get('input_type', 'unknown')})")
+            
+            exact_errors = "\n".join(error_details)
+            print(f"Validation error on attempt {attempt_history['attempt']}:\n{exact_errors}")
+            print(f"RAW OUTPUT THAT FAILED VALIDATION:\n{raw_output}")
+            attempt_history["last_error"] = exact_errors
+            raise JSONRecoveryRetryError(f"Failed to generate valid JSON: {exact_errors}")
         
-    except ValidationError as e:
-        # Problem 1: Vague Retry Feedback
-        # Iterate over e.errors() and capture exact missing/malformed keys
-        error_details = []
-        for err in e.errors():
-            loc = " -> ".join([str(l) for l in err['loc']])
-            error_details.append(f"Key '{loc}': {err['msg']}")
-        
-        exact_errors = "\n".join(error_details)
-        print(f"Validation error on attempt {attempt_history['attempt']}:\n{exact_errors}")
-        attempt_history["last_error"] = exact_errors
-        raise JSONRecoveryRetryError(f"Failed to generate valid JSON: {exact_errors}")
-        
-    except json.JSONDecodeError as e:
-        print(f"JSON Parse error on attempt {attempt_history['attempt']}: {e}")
-        attempt_history["last_error"] = f"JSON Decode Error: {str(e)}"
-        raise JSONRecoveryRetryError(f"Failed to parse JSON: {str(e)}")
     except Exception as e:
-        print(f"API error on attempt {attempt_history['attempt']}: {e}")
+        print(f"API/System error on attempt {attempt_history['attempt']}: {e}")
         raise
 
 

@@ -1,0 +1,11 @@
+Analyzing frontend...                                           
+
+   info - The import of 'dart:typed_data' is unnecessary because all of the used elements are also provided by the import of 'package:flutter/foundation.dart' - lib\main.dart:3:8 - unnecessary_import
+  error - Invalid constant value - lib\main.dart:325:86 - invalid_constant
+  error - The getter 'black' isn't defined for the type 'FontWeight' - lib\main.dart:325:97 - undefined_getter
+   info - Unnecessary braces in a string interpolation - lib\main.dart:354:43 - unnecessary_brace_in_string_interps
+warning - The value of the local variable 'anchor' isn't used - lib\main.dart:359:15 - unused_local_variable
+   info - Unnecessary braces in a string interpolation - lib\main.dart:365:36 - unnecessary_brace_in_string_interps
+   info - 'value' is deprecated and shouldn't be used. Use initialValue instead. This will set the initial value for the form field. This feature was deprecated after v3.33.0-1.0.pre - lib\main.dart:806:9 - deprecated_member_use
+warning - Unused import: 'package:flutter/material.dart' - test\widget_test.dart:1:8 - unused_import
+

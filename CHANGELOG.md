@@ -49,6 +49,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - After dismissal: the generated result is displayed normally.
 - Updated API key field label/hint to clarify that leaving it blank routes to Local RTX.
 
+#### 🤖 LLM Service & Validation Guard ([#3](https://github.com/tidypy/CareerLense-AI-ATS/issues/3))
+
+- **Fix — Backend (`backend/llm_service.py`):**
+  - Migrated to Pydantic V2 `model_validate` for dynamic schema instantiation, resolving the `Expected a callable` validation error.
+  - Implemented explicit type guards for `schema_model` to prevent runtime instantiation failures.
+  - Added **Raw Output Logging**: The system now logs the exact LLM response (e.g., "Quota Exceeded") before a validation error occurs, enabling faster triage.
+- **Added — Backend (`backend/verify_key.py`):**
+  - New diagnostic script for testing Google Gemini and Local LLM (RTX/LM Studio) connectivity outside the main application loop.
+
+#### 🎨 Dynamic Status Badge & Local Fallback UX ([#4](https://github.com/tidypy/CareerLense-AI-ATS/issues/4))
+
+- **Fix — Frontend (`frontend/lib/main.dart`):**
+  - **Dynamic Status Badge**: The top-right badge now transitions from Green (Connected) to **Amber (Local Fallback Active)** when a BYOK failure occurs.
+  - **Intelligent Dialog**: Updated `_showByokErrorDialog` with "⌛ Quota Exhausted" detection and a premium informational box.
+  - **Flutter Build**: Resolved `FontWeight` syntax errors and compilation blockers for Docker/Web targets.
+  - **Animated Feedback**: Added pulsating shadow and icon transitions for more premium visual signaling.
+
 ---
 
 ## [v0.1.0] — Initial Release
