@@ -60,10 +60,38 @@ class GenerateRequest(BaseModel):
     user_api_key: str | None = None
     target_seniority: str = "Mid-Level"
 
+class VerifyRequest(BaseModel):
+    user_api_key: str | None = None
+
 @app.get("/api/v1/health")
 def health_check():
     provider = os.getenv("LLM_PROVIDER", "auto")
-    return {"status": "ok", "active_provider": provider}
+    # Verify the server-side key as well
+    status = "ok"
+    try:
+        from backend.llm_service import GoogleLLMClient
+        g_client = GoogleLLMClient()
+        status = g_client.verify_connectivity()
+    except Exception:
+        status = "Key Missing/Invalid"
+        
+    return {"status": "ok", "api_status": status, "active_provider": provider}
+
+@app.post("/api/v1/verify-key")
+def verify_key_endpoint(req: VerifyRequest):
+    from backend.llm_service import GoogleLLMClient, LocalLLMClient
+    
+    if req.user_api_key and req.user_api_key.startswith(("http://", "https://")):
+        client = LocalLLMClient(base_url=req.user_api_key)
+        status = client.verify_connectivity()
+        return {"status": status, "type": "local"}
+    
+    try:
+        client = GoogleLLMClient(user_api_key=req.user_api_key)
+        status = client.verify_connectivity()
+        return {"status": status, "type": "google"}
+    except Exception as e:
+        return {"status": str(e), "type": "error"}
 
 @app.post("/api/v1/generate", response_class=HTMLResponse)
 def generate_endpoint(req: GenerateRequest, request: Request):
@@ -131,9 +159,16 @@ def _do_generate(req: GenerateRequest, client_ip: str):
             )
         except Exception as e_local:
             logger.error(f"[BYOK] Local fallback also failed for {client_ip}: {e_local}")
+            # Identify if it was a validation/looping failure
+            detail_msg = f"API key invalid ({byok_error_reason}) and Local RTX fallback also failed. "
+            if "JSONRecoveryRetryError" in str(e_local) or "JSON" in str(e_local):
+                detail_msg += "The local model was unable to generate valid JSON. Try a shorter job description."
+            else:
+                detail_msg += f"Error: {e_local}"
+                
             raise HTTPException(
                 status_code=502,
-                detail=f"API key invalid ({byok_error_reason}) and Local RTX fallback also failed: {e_local}"
+                detail=detail_msg
             )
 
     data_dict = data_model.model_dump()

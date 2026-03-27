@@ -66,6 +66,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - **Flutter Build**: Resolved `FontWeight` syntax errors and compilation blockers for Docker/Web targets.
   - **Animated Feedback**: Added pulsating shadow and icon transitions for more premium visual signaling.
 
+#### 🛡️ Restoration & Verification Refactor (v1.0.1+2) ([#5](https://github.com/tidypy/CareerLense-AI-ATS/issues/5))
+
+- **Fix — Backend (`backend/llm_service.py`):**
+  - **Restored Quality**: Removed restrictive "Conciseness Directives" to allow full-detail generation.
+  - **Connectivity Guard**: Added `verify_connectivity()` to actually test Google/Local keys before use.
+- **Fix — Backend (`backend/main.py`):**
+  - **NEW `/verify-key`**: Dedicated endpoint for real-time key/quota verification.
+  - **Verified Health**: Server health check now includes an actual API connectivity test.
+- **Fix — Frontend (`frontend/lib/main.dart`):**
+  - **Real-Time Verification**: Status badge now reflects the *actual* validity of the entered key, not just server status.
+  - **Cache-Busting**: Bumped version to `1.0.1+2` and added console logging to verify fresh builds.
+
 ---
 
 ## [v0.1.0] — Initial Release

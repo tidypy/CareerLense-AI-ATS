@@ -1,10 +1,9 @@
 import 'dart:convert';
 import 'dart:ui';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart'; // For kIsWeb and typed_data indirectly
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:file_saver/file_saver.dart';
 import 'package:universal_html/html.dart' as html;
 
@@ -92,6 +91,19 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
     
     _loadSavedResume();
     _checkApiHealth();
+    
+    // Add listener for real-time key verification
+    _apiKeyController.addListener(() {
+      final key = _apiKeyController.text;
+      // Debounce simple verification
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (key == _apiKeyController.text && mounted) {
+          _verifyUserKey(key);
+        }
+      });
+    });
+    
+    print("CareerLens Build Loaded: v1.0.1+2");
   }
 
   @override
@@ -126,17 +138,61 @@ class _CareerLensHomeState extends State<CareerLensHome> with SingleTickerProvid
     try {
       final response = await http.get(Uri.parse(healthUrl)).timeout(const Duration(seconds: 3));
       if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
         setState(() {
-          _apiStatus = "API Connected";
+          _apiStatus = data['api_status'] ?? "API Connected";
         });
       } else {
         setState(() {
-          _apiStatus = "API Error: \${response.statusCode}";
+          _apiStatus = "API Error: ${response.statusCode}";
         });
       }
     } catch (e) {
       setState(() {
         _apiStatus = "API Offline";
+      });
+    }
+  }
+
+  Future<void> _verifyUserKey(String key) async {
+    if (key.trim().isEmpty) {
+      _checkApiHealth(); // Revert to server health check
+      return;
+    }
+
+    setState(() {
+      _apiStatus = "Verifying Key...";
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse("$_backendUrl/verify-key"),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'user_api_key': key.trim()}),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final status = data['status'];
+        setState(() {
+          if (status == 'ok') {
+            _apiStatus = "API Connected";
+            _isLocalFallback = false;
+          } else {
+            _apiStatus = status;
+            if (status.toString().contains("Offline")) {
+              _isLocalFallback = true;
+            }
+          }
+        });
+      } else {
+        setState(() {
+          _apiStatus = "Verify Failed";
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _apiStatus = "Network Error";
       });
     }
   }

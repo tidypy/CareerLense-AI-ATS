@@ -1,8 +1,10 @@
 import os
 import json
+import logging
+import logging
 from enum import Enum
 from pathlib import Path
-from typing import Type
+from typing import Type, no_type_check, cast
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, stop_after_attempt, wait_fixed
 from fastapi import HTTPException
@@ -10,6 +12,16 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from openai import OpenAI
+
+logger = logging.getLogger("careerlens.json_repair")
+
+try:
+    from backend.json_repair import try_parse_repaired_json, repair_json
+except ImportError:
+    try:
+        from .json_repair import try_parse_repaired_json, repair_json
+    except ImportError:
+        from json_repair import try_parse_repaired_json, repair_json
 
 load_dotenv()
 
@@ -49,6 +61,20 @@ class GoogleLLMClient(LLMClient):
             
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
+
+    def verify_connectivity(self) -> str:
+        """Verifies API key and quota."""
+        try:
+            # list_models is a safe way to check connectivity without generating content
+            for _ in genai.list_models():
+                break
+            return "ok"
+        except google_exceptions.Unauthenticated:
+            return "Invalid API Key"
+        except google_exceptions.ResourceExhausted:
+            return "Quota Exhausted"
+        except Exception as e:
+            return f"Error: {str(e)}"
 
     def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
         try:
@@ -96,6 +122,15 @@ class LocalLLMClient(LLMClient):
             
         self.model_id = model_id
         self.client = OpenAI(base_url=base_url, api_key=api_key)
+        
+    def verify_connectivity(self) -> str:
+        """Verifies local server is up."""
+        try:
+            # Try to list models
+            self.client.models.list()
+            return "ok"
+        except Exception as e:
+            return f"Local Server Offline: {str(e)}"
         
     def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
         kwargs: dict = {
@@ -217,12 +252,22 @@ Use the following candidate facts as reference:
         if raw_output.startswith("```"):
             raw_output = raw_output.replace("```", "", 1)
             
-        # Robust Validation
+        # Robust Validation with Repair Attempt
         try:
-            parsed_json = json.loads(raw_output.strip())
+            parsed_json = try_parse_repaired_json(raw_output)
         except json.JSONDecodeError as e:
-            print(f"JSON Parse error on attempt {attempt_history['attempt']}: {e}")
-            print(f"RAW OUTPUT THAT FAILED TO PARSE:\n{raw_output}")
+            # Check if it was because it's too long
+            is_truncated = False
+            if len(raw_output) > 20000: # Heuristic
+                 is_truncated = True
+            
+            error_msg = f"JSON Parse error on attempt {attempt_history['attempt']}: {e}"
+            if is_truncated:
+                error_msg += " (Output appears truncated)"
+            
+            print(error_msg)
+            safe_output = cast(str, str(raw_output))
+            print(f"RAW OUTPUT THAT FAILED TO PARSE:\n{safe_output[0:500]}... [TRUNCATED]")
             attempt_history["last_error"] = f"JSON Decode Error: {str(e)}"
             raise JSONRecoveryRetryError(f"Failed to parse JSON: {str(e)}")
 
