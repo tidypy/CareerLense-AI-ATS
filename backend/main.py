@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
+import json
 import time
 import logging
 import threading
@@ -11,7 +12,7 @@ import jinja2
 from pathlib import Path
 from collections import defaultdict
 
-from backend.llm_service import generate_career_data, BYOKKeyError, LocalLLMClient, run_generation_with_retry
+from backend.llm_service import generate_career_data, BYOKKeyError, _generate_with_retry
 from backend.dynamic_parsing import parse_html_to_pydantic
 
 # --- Logging ---
@@ -59,6 +60,7 @@ class GenerateRequest(BaseModel):
     master_resume: str = ""
     user_api_key: str | None = None
     target_seniority: str = "Mid-Level"
+    force_local: bool = False
 
 class VerifyRequest(BaseModel):
     user_api_key: str | None = None
@@ -66,14 +68,14 @@ class VerifyRequest(BaseModel):
 @app.get("/api/v1/health")
 def health_check():
     provider = os.getenv("LLM_PROVIDER", "auto")
-    # Verify the server-side key as well
-    status = "ok"
+    status = "Not Connected"
     try:
         from backend.llm_service import GoogleLLMClient
+        # This will check the server-side GOOGLE_API_KEY
         g_client = GoogleLLMClient()
         status = g_client.verify_connectivity()
-    except Exception:
-        status = "Key Missing/Invalid"
+    except Exception as e:
+        status = f"Status Error: {str(e)}"
         
     return {"status": "ok", "api_status": status, "active_provider": provider}
 
@@ -135,43 +137,55 @@ def _do_generate(req: GenerateRequest, client_ip: str):
 
     byok_error_reason: str | None = None
 
-    try:
-        data_model = generate_career_data(
-            req.job_description,
-            req.master_resume,
-            DynamicCareerData,
-            req.user_api_key,
-            req.target_seniority
-        )
-    except BYOKKeyError as e:
-        # User's key failed — record the reason and fall back to Local RTX
-        byok_error_reason = str(e)
-        logger.warning(f"[BYOK] Key failed for {client_ip}: {byok_error_reason}. Falling back to Local RTX.")
-        try:
-            local_client = LocalLLMClient()
-            data_model = run_generation_with_retry(
-                local_client,
-                req.job_description,
-                req.master_resume,
-                DynamicCareerData,
-                {"attempt": 0},
-                req.target_seniority
-            )
-        except Exception as e_local:
-            logger.error(f"[BYOK] Local fallback also failed for {client_ip}: {e_local}")
-            # Identify if it was a validation/looping failure
-            detail_msg = f"API key invalid ({byok_error_reason}) and Local RTX fallback also failed. "
-            if "JSONRecoveryRetryError" in str(e_local) or "JSON" in str(e_local):
-                detail_msg += "The local model was unable to generate valid JSON. Try a shorter job description."
-            else:
-                detail_msg += f"Error: {e_local}"
-                
-            raise HTTPException(
-                status_code=502,
-                detail=detail_msg
-            )
+    # --- Strategy: Blueprint-Guided Generation ---
+    # We extract all expected keys for our Dynamic Model and pass them to the LLM.
+    # We use descriptive values like "(text)" instead of "..." to prevent LLM loops.
+    schema_info = DynamicCareerData.model_json_schema().get("properties", {})
+    schema_blueprint = json.dumps({k: "(generate detailed text here)" for k in schema_info}, indent=2)
+    
+    blueprint_prompt = (
+        f"IMPORTANT: Strictly adhere to this JSON structure blueprint:\n"
+        f"```json\n{schema_blueprint}\n```\n"
+        "Rules:\n"
+        "1. Output valid JSON ONLY.\n"
+        "2. NO Conversational filler.\n"
+        "3. NO Placeholders: Do NOT return literally '{{VAR}}' or '(text)'. Replace with actual content.\n"
+        "4. Exact Keys: Ensure ALL keys from the blueprint are present.\n"
+    )
 
-    data_dict = data_model.model_dump()
+    try:
+        from backend.llm_service import generate_career_data
+        
+        # We always call generate_career_data, it handles all routing (Gemini vs Local) internally
+        data_model_dict = generate_career_data(
+            job_desc=req.job_description,
+            master_resume=req.master_resume,
+            target_seniority=req.target_seniority,
+            schema_model=DynamicCareerData,
+            user_api_key=req.user_api_key,
+            force_local=req.force_local,
+            system_prompt_extension=blueprint_prompt
+        )
+            
+    except BYOKKeyError as e_api:
+        # IMPORTANT: If the API failed, we RAISE immediately.
+        # This gives the user instant feedback (2 seconds vs 70 seconds).
+        # They can choose to "Try Local" manually in the UI.
+        raise HTTPException(
+            status_code=403,
+            detail=str(e_api),
+            headers={"X-Technical-Details": str(e_api)}
+        )
+    except Exception as e:
+        # Catch other errors (Local failing, or fatal system errors)
+        logger.error(f"[Generation] Fatal error for {client_ip}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Generation Failed: {str(e)}",
+            headers={"X-Technical-Details": str(e)}
+        )
+
+    data_dict = data_model_dict
     try:
         template = jinja2.Template(html_content)
         rendered_html = template.render(**data_dict)

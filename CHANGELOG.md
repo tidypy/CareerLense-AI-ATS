@@ -66,7 +66,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - **Flutter Build**: Resolved `FontWeight` syntax errors and compilation blockers for Docker/Web targets.
   - **Animated Feedback**: Added pulsating shadow and icon transitions for more premium visual signaling.
 
-#### 🛡️ Restoration & Verification Refactor (v1.0.1+2) ([#5](https://github.com/tidypy/CareerLense-AI-ATS/issues/5))
+## [v1.0.1+4] - 2026-03-27
+### Added
+- **Naked Schema Purge**: Implemented a recursive whitelist filter (`prepare_schema_for_gemini`) to strip all non-functional metadata from the JSON schema (title, description, default).
+- **Strict Dereferencing**: Added support for dual-key schema definitions (`$defs` and legacy `definitions`) for inlining nested model structures.
+
+### Fixed
+- **Gemini InvalidArgument (title)**: Resolved a fatal rejection error where Google Gemini strictly refused JSON schemas containing "title" or "description" fields.
+
+## [v1.0.1+3] - 2026-03-27
 
 - **Fix — Backend (`backend/llm_service.py`):**
   - **Restored Quality**: Removed restrictive "Conciseness Directives" to allow full-detail generation.

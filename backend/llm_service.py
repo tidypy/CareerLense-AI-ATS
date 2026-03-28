@@ -1,10 +1,9 @@
 import os
 import json
 import logging
-import logging
 from enum import Enum
 from pathlib import Path
-from typing import Type, no_type_check, cast
+from typing import Type, Any, no_type_check, cast
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, stop_after_attempt, wait_fixed
 from fastapi import HTTPException
@@ -16,18 +15,87 @@ from openai import OpenAI
 logger = logging.getLogger("careerlens.json_repair")
 
 try:
-    from backend.json_repair import try_parse_repaired_json, repair_json
+    from backend import json_repair
 except ImportError:
     try:
-        from .json_repair import try_parse_repaired_json, repair_json
+        import json_repair
     except ImportError:
-        from json_repair import try_parse_repaired_json, repair_json
+        from . import json_repair # type: ignore
 
 load_dotenv()
 
 # Raised when the user's BYOK key is invalid/expired/out of quota
 class BYOKKeyError(Exception):
     pass
+
+def prepare_schema_for_gemini(schema: Any, full_schema: dict) -> Any:
+    """Recursively inlines $ref pointers and STRIPS all non-Gemini keywords (title, description, default, etc)."""
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return [prepare_schema_for_gemini(item, full_schema) for item in schema]
+        return schema
+
+    # 1. Resolve $ref if present
+    if "$ref" in schema:
+        ref_path = schema["$ref"].split("/")
+        if len(ref_path) == 3 and (ref_path[1] == "$defs" or ref_path[1] == "definitions"):
+            ref_key = ref_path[2]
+            referred_obj = full_schema.get("$defs", {}).get(ref_key, {}) or full_schema.get("definitions", {}).get(ref_key, {})
+            return prepare_schema_for_gemini(referred_obj, full_schema)
+            
+    # 2. Handle anyOf (from Optional values)
+    if "anyOf" in schema:
+        primary = [p for p in schema["anyOf"] if p.get("type") != "null"]
+        if primary:
+            return prepare_schema_for_gemini(primary[0], full_schema)
+
+    # 3. Strict Whitelist
+    WHITELIST = {'type', 'properties', 'items', 'required', 'enum'}
+    cleaned = {}
+    for k, v in schema.items():
+        if k in WHITELIST:
+            if k == 'properties' and isinstance(v, dict):
+                cleaned[k] = { 
+                    prop_name: prepare_schema_for_gemini(prop_val, full_schema) 
+                    for prop_name, prop_val in v.items() 
+                }
+            else:
+                cleaned[k] = prepare_schema_for_gemini(v, full_schema)
+    return cleaned
+
+def prepare_schema_for_local(schema: Any, full_schema: dict) -> Any:
+    """Keeps types, properties, items, required, enum, but strips titles/descriptions for local models."""
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return [prepare_schema_for_local(item, full_schema) for item in schema]
+        return schema
+
+    if "$ref" in schema:
+        ref_path = schema["$ref"].split("/")
+        if len(ref_path) == 3 and (ref_path[1] == "$defs" or ref_path[1] == "definitions"):
+            ref_key = ref_path[2]
+            referred_obj = full_schema.get("$defs", {}).get(ref_key, {}) or full_schema.get("definitions", {}).get(ref_key, {})
+            return prepare_schema_for_local(referred_obj, full_schema)
+
+    if "anyOf" in schema:
+        primary = [p for p in schema["anyOf"] if p.get("type") != "null"]
+        if primary:
+            return prepare_schema_for_local(primary[0], full_schema)
+
+    WHITELIST = {'type', 'properties', 'items', 'required', 'enum'}
+    cleaned: dict[str, Any] = {}
+    for k, v in schema.items():
+        if k in WHITELIST:
+            if k == 'properties' and isinstance(v, dict):
+                cleaned[k] = {pk: prepare_schema_for_local(pv, full_schema) for pk, pv in v.items()}
+            else:
+                cleaned[k] = prepare_schema_for_local(v, full_schema)
+    
+    # CRITICAL: Always provide a 'type' to local models to stop them from returning objects for text fields
+    if not cleaned.get('type') and not cleaned.get('properties') and not cleaned.get('items'):
+        cleaned['type'] = 'string'
+
+    return cleaned
 
 class LLMProvider(str, Enum):
     GOOGLE = "google"
@@ -63,25 +131,30 @@ class GoogleLLMClient(LLMClient):
         self.model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
 
     def verify_connectivity(self) -> str:
-        """Verifies API key and quota."""
+        """Verifies API key, quota, and Generative Language API status."""
+        if not self.api_key or self.api_key == "REPLACE_WITH_YOUR_KEY":
+            return "API Not Configured"
+            
         try:
-            # list_models is a safe way to check connectivity without generating content
-            for _ in genai.list_models():
-                break
-            return "ok"
+            response = self.model.generate_content("Say OK", generation_config={"max_output_tokens": 5})
+            if response.candidates:
+                return "API Connected"
+            return "Key Works (No Response)"
+        except google_exceptions.ResourceExhausted:
+            return "Out of Credits"
         except google_exceptions.Unauthenticated:
             return "Invalid API Key"
-        except google_exceptions.ResourceExhausted:
-            return "Quota Exhausted"
         except Exception as e:
+            msg = str(e).lower()
+            if "quota" in msg:
+                return "Out of Credits"
+            if "api key not valid" in msg or "invalid api key" in msg:
+                return "Invalid API Key"
             return f"Error: {str(e)}"
 
     def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
         try:
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            
-            # If schema is provided, we can either update the model config or pass it here.
-            # For Gemini, it's often best to set it in the generation_config.
             generation_config: dict = {"response_mime_type": "application/json"}
             if schema_json:
                 generation_config["response_schema"] = schema_json
@@ -90,22 +163,19 @@ class GoogleLLMClient(LLMClient):
                 full_prompt,
                 generation_config=generation_config
             )
+            
+            if not response.candidates:
+                raise BYOKKeyError("Gemini failed to generate candidates.")
+                
             return response.text
-        except google_exceptions.InvalidArgument as e:
-            raise BYOKKeyError(f"Invalid API key — Google rejected it. Check that your key is correct. ({e.message})") from e
-        except google_exceptions.PermissionDenied as e:
-            raise BYOKKeyError(f"API key does not have permission. Verify the key is enabled for Gemini. ({e.message})") from e
-        except google_exceptions.ResourceExhausted as e:
-            raise BYOKKeyError(f"API key quota exhausted — you are out of tokens or have hit a rate limit. ({e.message})") from e
-        except google_exceptions.Unauthenticated as e:
-            raise BYOKKeyError(f"API key authentication failed. The key may be expired or revoked. ({e.message})") from e
+        except Exception as e:
+            raise BYOKKeyError(f"Google API Error: {str(e)}")
 
 class LocalLLMClient(LLMClient):
     def __init__(self, base_url: str | None = None):
         api_key = "not-needed"
         model_id = "local-model"
         
-        # Parse complex LM Studio BYOK: http://url:1234/v1|API_KEY|MODEL_ID
         if base_url and "|" in base_url:
             parts = base_url.split("|")
             base_url = parts[0]
@@ -124,13 +194,18 @@ class LocalLLMClient(LLMClient):
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         
     def verify_connectivity(self) -> str:
-        """Verifies local server is up."""
         try:
-            # Try to list models
+            # Short timeout for health check
             self.client.models.list()
-            return "ok"
+            return "Local Connected"
         except Exception as e:
-            return f"Local Server Offline: {str(e)}"
+            msg = str(e).lower()
+            logger.warning(f"Local Connectivity Check Failed: {msg}")
+            if "no models loaded" in msg:
+                return "LM Studio: Load Model"
+            if "connection refused" in msg or "not found" in msg:
+                return "Local Offline"
+            return "Local Error"
         
     def generate_json(self, system_prompt: str, user_prompt: str, schema_json: dict | None = None) -> str:
         kwargs: dict = {
@@ -140,10 +215,9 @@ class LocalLLMClient(LLMClient):
                 {"role": "user", "content": user_prompt}
             ],
             "temperature": 0.7,
-            "max_tokens": 24000
+            "max_tokens": 4096
         }
 
-        # Enable structured output if schema is provided
         if schema_json:
             kwargs["response_format"] = {
                 "type": "json_schema",
@@ -154,190 +228,134 @@ class LocalLLMClient(LLMClient):
                 }
             }
 
-        response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
-
+        try:
+            response = self.client.chat.completions.create(
+                **kwargs,
+                timeout=180
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                raise HTTPException(status_code=408, detail="Local LLM Timeout")
+            raise
 
 class JSONRecoveryRetryError(Exception):
     pass
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-def run_generation_with_retry(
-        client: LLMClient,
-        job_description: str,
-        master_resume: str,
-        schema_model: Type[BaseModel],
-        attempt_history: dict,
-        target_seniority: str = "Mid-Level") -> BaseModel:
+def _generate_with_retry(
+    client: LLMClient,
+    job_desc: str,
+    master_facts: str,
+    target_seniority: str,
+    schema_model: Type[BaseModel],
+    provider: LLMProvider,
+    attempt_history: dict,
+    system_prompt_extension: str = ""
+) -> BaseModel:
     
     attempt_history["attempt"] += 1
-    
-    # Determine source of truth: User Input vs. Local Personal Data
-    if master_resume and master_resume.strip():
-        master_facts = master_resume.strip()
-    else:
-        master_facts = read_master_data()
-
-    # Extract the actual dict schema for API consumption
-    schema_dict = schema_model.model_json_schema()
+    raw_schema = schema_model.model_json_schema()
     
     SENIORITY_MATRIX = {
-        "Executive": """DIRECTIVE: Target seniority is EXECUTIVE.
-Title Selection: Prioritize (Exec) variants (e.g., Director, Owner).
-Content Weight: 80% Strategy/ROI, 20% Execution.
-Achievement Filter: Focus on P&L impact, governance, $250k+ savings, and organizational architecture.
-JSON Map: Fill {{REALITY_BADGE}} with "Strategic Asset."
-""",
-        "Senior": """DIRECTIVE: Target seniority is SENIOR.
-Title Selection: Prioritize (Sr) or (Exec) if the role is a "Lead" position.
-Content Weight: 50% Technical Expertise, 50% Leadership/Mentoring.
-Achievement Filter: Focus on process optimization, systems architecture, and project spearheading.
-JSON Map: Fill {{REALITY_BADGE}} with "Subject Matter Expert."
-""",
-        "Mid-Level": """DIRECTIVE: Target seniority is MID-LEVEL.
-Title Selection: STRICT: Pick ONLY (Mid) variants. Redact all "Director," "Owner," and "SBA" prefixes.
-Content Weight: 90% Task Execution/Compliance, 10% Oversight.
-Achievement Filter: Focus on SOP adherence, daily operations, payroll accuracy, and technical proficiency.
-JSON Map: Fill {{REALITY_BADGE}} with "Turnkey Professional."
-""",
-        "Junior": """DIRECTIVE: Target seniority is JUNIOR.
-Title Selection: Pick (Mid) or (Entry) variants. Strip all management-level achievements.
-Content Weight: 100% Technical Tasks/Learning.
-Achievement Filter: Focus on reliability, documentation, and specific tool utilization.
-JSON Map: Fill {{REALITY_BADGE}} with "High-Potential Contributor."
-""",
-        "Entry": """DIRECTIVE: Target seniority is ENTRY/ASSISTANT.
-Title Selection: STRICT: Use (Entry) titles. If unavailable, use (Mid) and downgrade the summary to "Coordinator" or "Support".
-Content Weight: 100% Administrative/Manual Support.
-Achievement Filter: Focus on attendance, basic workflow completion, and general support tasks.
-JSON Map: Fill {{REALITY_BADGE}} with "Foundational Asset."
-"""
+        "Executive": "DIRECTIVE: Target seniority is EXECUTIVE. Content Weight: 80% Strategy/ROI, 20% Execution. JSON Map: Fill {{REALITY_BADGE}} with 'Strategic Asset.'",
+        "Senior": "DIRECTIVE: Target seniority is SENIOR. Content Weight: 50% Technical Expertise, 50% Leadership/Mentoring. JSON Map: Fill {{REALITY_BADGE}} with 'Subject Matter Expert.'",
+        "Mid-Level": "DIRECTIVE: Target seniority is MID-LEVEL. Redact all management-level achievements. JSON Map: Fill {{REALITY_BADGE}} with 'Turnkey Professional.'",
+        "Junior": "DIRECTIVE: Target seniority is JUNIOR. Strip all management-level achievements. JSON Map: Fill {{REALITY_BADGE}} with 'High-Potential Contributor.'",
+        "Entry": "DIRECTIVE: Target seniority is ENTRY/ASSISTANT. JSON Map: Fill {{REALITY_BADGE}} with 'Foundational Asset.'"
     }
     directive = SENIORITY_MATRIX.get(target_seniority, SENIORITY_MATRIX["Mid-Level"])
     
-    system_prompt = f"""You are an expert Career Advisor and ATS Optimizer.
-Your goal is to transform the provided master profile into a highly tailored, ATS-optimized report for the specific job description.
-
-IMPORTANT RULES:
-1. Complete JSON: You MUST output a complete, valid JSON object that populates EVERY field in the provided schema. Do not skip or truncate any section.
-2. No Markdown: Do NOT use markdown formatting (like **bolding**) inside any JSON string values. Use plain text only.
-3. Contact Info: Extract CANDIDATE_NAME, CANDIDATE_LOCATION, CANDIDATE_EMAIL, CANDIDATE_LINKEDIN from the Master Profile. Use "Not Provided" if missing.
-4. Structure: You MUST generate EXACTLY 6 objects inside the 'MATCHES' array to complete the UI grid layout.
-5. Content: Be specific, quantifiable, and align exactly with the target seniority.
-
-Use the following candidate facts as reference:
-{master_facts}
-
---- CRITICAL SENIORITY DIRECTIVE ---
+    system_prompt = f"""You are an expert Career Advisor.
+{system_prompt_extension}
+RULES:
+1. Complete JSON for provided schema.
+2. No Markdown.
+3. Extract Contact Info from Profile.
+4. EXACTLY 6 'MATCHES'.
+Facts: {master_facts}
+--- SENIORITY ---
 {directive}
 """
-    # Fallback to including the schema in the prompt only if we were NOT doing constrained decoding
-    # But here we will always pass the schema dict to the client now.
     
-    user_prompt = f"Job Description:\n{job_description}"
+    user_prompt = f"Job Description:\n{job_desc}"
 
     if attempt_history["attempt"] > 1:
         validation_errors = attempt_history.get("last_error", "Invalid JSON format.")
-        system_prompt += f"\n\nCRITICAL FIX REQUIRED: Your last attempt failed with validation errors. You MUST fix these:\n{validation_errors}"
+        system_prompt += f"\n\nFIX REQUEST: Last attempt failed:\n{validation_errors}"
     
+    if provider == LLMProvider.GOOGLE:
+        schema = prepare_schema_for_gemini(raw_schema, raw_schema)
+    else:
+        schema = prepare_schema_for_local(raw_schema, raw_schema)
+
     try:
-        raw_output = client.generate_json(system_prompt, user_prompt, schema_json=schema_dict)
-        
+        raw_output = client.generate_json(system_prompt=system_prompt, user_prompt=user_prompt, schema_json=schema)
         # Cleanup
-        raw_output = str(raw_output).strip()
-        if raw_output.startswith("```json"):
-            raw_output = raw_output.replace("```json", "", 1)
-        if raw_output.endswith("```"):
-            raw_output = raw_output[:-3]
-        if raw_output.startswith("```"):
-            raw_output = raw_output.replace("```", "", 1)
+        raw_output = str(raw_output).strip().replace("```json", "").replace("```", "")
             
-        # Robust Validation with Repair Attempt
         try:
-            parsed_json = try_parse_repaired_json(raw_output)
-        except json.JSONDecodeError as e:
-            # Check if it was because it's too long
-            is_truncated = False
-            if len(raw_output) > 20000: # Heuristic
-                 is_truncated = True
-            
-            error_msg = f"JSON Parse error on attempt {attempt_history['attempt']}: {e}"
-            if is_truncated:
-                error_msg += " (Output appears truncated)"
-            
-            print(error_msg)
-            safe_output = cast(str, str(raw_output))
-            print(f"RAW OUTPUT THAT FAILED TO PARSE:\n{safe_output[0:500]}... [TRUNCATED]")
-            attempt_history["last_error"] = f"JSON Decode Error: {str(e)}"
-            raise JSONRecoveryRetryError(f"Failed to parse JSON: {str(e)}")
-
-        # Type Guard: Ensure schema_model is a class and not an error object
-        if not hasattr(schema_model, "model_validate"):
-             print(f"ERROR: schema_model is not a valid Pydantic V2 class! Got: {type(schema_model)}")
-             raise TypeError(f"Expected a Pydantic V2 model class, got {type(schema_model)}")
+            parsed_json = json_repair.try_parse_repaired_json(raw_output)
+        except Exception as e:
+            attempt_history["last_error"] = f"JSON Parse Error: {str(e)}"
+            raise JSONRecoveryRetryError(f"Parse failed: {str(e)}")
 
         try:
-            # Use model_validate (Pydantic V2) for better error reporting
-            validated_data = schema_model.model_validate(parsed_json)
-            return validated_data
+            return schema_model.model_validate(parsed_json)
         except ValidationError as e:
-            # Problem 1: Vague Retry Feedback
-            # Iterate over e.errors() and capture exact missing/malformed keys
-            error_details = []
-            for err in e.errors():
-                loc = " -> ".join([str(l) for l in err['loc']])
-                error_details.append(f"Key '{loc}': {err['msg']} (Input Type: {err.get('input_type', 'unknown')})")
-            
+            error_details = [f"Key '{'.'.join([str(l) for l in err['loc']])}': {err['msg']}" for err in e.errors()]
             exact_errors = "\n".join(error_details)
-            print(f"Validation error on attempt {attempt_history['attempt']}:\n{exact_errors}")
-            print(f"RAW OUTPUT THAT FAILED VALIDATION:\n{raw_output}")
             attempt_history["last_error"] = exact_errors
-            raise JSONRecoveryRetryError(f"Failed to generate valid JSON: {exact_errors}")
+            raise JSONRecoveryRetryError(f"Validation failed: {exact_errors}")
         
     except Exception as e:
-        print(f"API/System error on attempt {attempt_history['attempt']}: {e}")
+        logger.error(f"Attempt {attempt_history['attempt']} failed: {str(e)}")
         raise
 
-
 def generate_career_data(
-    job_description: str,
+    job_desc: str,
     master_resume: str,
-    schema_model: Type[BaseModel],
+    target_seniority: str = "Mid-Level",
+    schema_model: Type[BaseModel] | None = None,
     user_api_key: str | None = None,
-    target_seniority: str = "Mid-Level"
-) -> BaseModel:
-    """
-    BYOK Routing Rules:
-    - user_api_key is blank/None → go DIRECTLY to Local RTX (TailScale). Skip Google entirely.
-    - user_api_key is an http/https URL → treat as LM Studio endpoint, go local.
-    - user_api_key has a value (Google key) → try Google first.
-        - If BYOKKeyError is raised, re-raise it so main.py can fall back to local
-          and set the X-BYOK-Error response header for the frontend dialog.
-    """
+    force_local: bool = False,
+    system_prompt_extension: str = ""
+) -> dict:
+    # 1. Determine Provider
     is_lm_link = user_api_key and (user_api_key.startswith("http://") or user_api_key.startswith("https://"))
     has_user_key = bool(user_api_key and user_api_key.strip())
+    
+    provider = LLMProvider.LOCAL
+    if is_lm_link or not has_user_key or force_local:
+        provider = LLMProvider.LOCAL
+    else:
+        provider = LLMProvider.GOOGLE
 
-    def try_with_client(client: LLMClient, name: str):
-        if not client:
-            raise ValueError(f"{name} client is unavailable.")
-        print(f"[BYOK] Attempting generation with {name} client for seniority '{target_seniority}'...")
-        return run_generation_with_retry(client, job_description, master_resume, schema_model, {"attempt": 0}, target_seniority)
+    # 2. Select Client
+    client: LLMClient
+    if provider == LLMProvider.GOOGLE:
+        client = GoogleLLMClient(user_api_key=user_api_key)
+    else:
+        client = LocalLLMClient(base_url=user_api_key if is_lm_link else None)
 
-    # ── Path A: LM Studio URL provided ──────────────────────────────────────
-    if is_lm_link:
-        print(f"[BYOK] LM Studio URL detected — routing directly to Local.")
-        local_client = LocalLLMClient(base_url=user_api_key)
-        return try_with_client(local_client, "Local (LM Studio BYOK)")
-
-    # ── Path B: Blank key — skip Google, go straight to Local RTX ───────────
-    if not has_user_key:
-        print(f"[BYOK] Key is blank — routing directly to Local RTX (TailScale).")
-        local_client = LocalLLMClient()
-        return try_with_client(local_client, "Local RTX")
-
-    # ── Path C: Google BYOK key provided — try Google, propagate BYOKKeyError ─
-    print(f"[BYOK] User key provided — trying Google first.")
-    google_client = GoogleLLMClient(user_api_key=user_api_key)
-    # BYOKKeyError is intentionally NOT caught here — let main.py handle it
-    # so it can do the local fallback and set the response header.
-    return try_with_client(google_client, "Google (BYOK)")
+    # 3. Schema
+    if not schema_model:
+        from .dynamic_parsing import parse_html_to_pydantic
+        schema_model = parse_html_to_pydantic()
+    
+    master_facts = read_master_data()
+    
+    attempt_history = {"attempt": 0, "last_error": None}
+    
+    validated_data = _generate_with_retry(
+        client=client,
+        job_desc=job_desc,
+        master_facts=master_facts,
+        target_seniority=target_seniority,
+        schema_model=schema_model,
+        provider=provider,
+        attempt_history=attempt_history,
+        system_prompt_extension=system_prompt_extension
+    )
+    
+    return validated_data.model_dump()

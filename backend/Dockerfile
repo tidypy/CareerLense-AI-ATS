@@ -10,13 +10,13 @@ RUN flutter pub get
 RUN flutter build web --release
 
 # Stage 2: Create the Python Backend Image
-FROM python:3.11-slim
+FROM python:3.11
 
 WORKDIR /app
 
-# Copy requirements and install
+# Final dependency hardening
 COPY backend/requirements.txt .
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --upgrade --no-cache-dir pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend code
