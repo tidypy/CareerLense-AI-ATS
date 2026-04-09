@@ -20,3 +20,4 @@ dist/
 error.txt
 models.txt
 debug.txt
+.aider*

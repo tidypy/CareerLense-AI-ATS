@@ -1,0 +1,32 @@
+# .aider.conf.yml - Senior Architect / Market-Ready Profile
+model: openai/localhost
+api-key: not-needed
+base-url: http://localhost:1234/v1
+
+# Architecture & Logic
+architect: true
+edit-format: diff
+map-tokens: 1024
+cache-prompts: true
+
+# Performance & Stability
+stream: true
+timeout: 600
+show-diffs: true
+auto-commits: true
+
+# DevOps & ITIL Guardrails
+# These ensure Windows processes terminate correctly and follow your Fail Fast rules.
+lint-cmd: "cmd /c flutter analyze"
+test-cmd: "cmd /c flutter test"
+
+# Context Pinning
+# Automatically loads your rules so the Genie never forgets the "Walk".
+read:
+  - AGENT.md
+  - environment.md
+  - CHANGELOG.md
+
+# UI & Output
+theme: monokai
+dark-mode: true
