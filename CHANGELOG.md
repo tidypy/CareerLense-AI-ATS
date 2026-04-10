@@ -6,9 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased] — 2026-03-27
+## [Unreleased] — 2026-04-10
 
 ### Planned
+
+#### 🛑 LLM Interruption & Grammar Deadlock Fix ([#1](https://github.com/tidypy/ATS-CareerLense-UserV3/issues/1))
+
+**Goal:** Resolve the "looping" issue in LM Studio by implementing streaming responses with an abort signal and emergency exit tokens.
+
+- **Phase 1 (Backend):** 
+  - Refactor `LocalLLMClient` to use **Streaming Mode** (`stream=True`) to allow for mid-generation cancellation.
+  - Implement a `cancellation_registry` using `threading.Event` to track and abort active processing tasks.
+  - Inject explicit **Emergency Stop Tokens** (`["\n\n\n", "```"]`) to break grammar-constrained decoding loops in large models.
+- **Phase 2 (API):**
+  - Add `POST /api/v1/interrupt` endpoint to signal abortion for a specific client IP.
+  - Refactor generation endpoints for better responsiveness during cancellation checks.
+- **Phase 3 (Frontend):**
+  - Wire the "INTERRUPT GENERATION" button in Flutter to call the new `/interrupt` endpoint before closing the client socket.
+
+### Planned (Legacy)
 
 #### ⚡ Schema-First Constrained Decoding Refactor ([#2](https://github.com/tidypy/CareerLense-AI-ATS/issues/2))
 
